@@ -46,17 +46,14 @@ async function handleComments(url, env) {
   try {
     const posts = await fetchPostsInRange({ accessToken, businessAccountId, start: range.start, end: range.end });
     const postsWithComments = posts.filter((post) => post.comments_count);
-
-    const commentsByPost = await Promise.all(
-      postsWithComments.map((post) => fetchAllComments({ accessToken, postId: post.id }))
-    );
+    const commentsByPostId = await fetchAllCommentsForPosts({ accessToken, posts: postsWithComments });
 
     const rows = [];
-    postsWithComments.forEach((post, index) => {
-      for (const comment of commentsByPost[index]) {
+    for (const post of postsWithComments) {
+      for (const comment of commentsByPostId.get(post.id) ?? []) {
         rows.push(commentToRow(post, comment));
       }
-    });
+    }
 
     const csv = buildCsv(rows);
     const filename = `tataki_commentaires_${startParam}_${endParam}.csv`;
@@ -121,26 +118,90 @@ async function fetchPostsInRange({ accessToken, businessAccountId, start, end })
   return posts;
 }
 
-async function fetchAllComments({ accessToken, postId }) {
-  const comments = [];
-  let apiUrl = new URL(`https://graph.facebook.com/${GRAPH_API_VERSION}/${postId}/comments`);
-  apiUrl.searchParams.set("fields", COMMENT_FIELDS);
-  apiUrl.searchParams.set("limit", "50");
-  apiUrl.searchParams.set("access_token", accessToken);
+const BATCH_SIZE = 50; // max sous-requêtes par appel batch Graph API
+const MAX_ROUNDS = 200; // garde-fou contre une boucle infinie en cas de réponse inattendue
 
-  while (apiUrl) {
-    const body = await graphFetch(apiUrl);
-    for (const item of body.data ?? []) {
-      comments.push({ ...item, is_reply: false, parent_id: null });
-      for (const reply of item.replies?.data ?? []) {
-        comments.push({ ...reply, is_reply: true, parent_id: item.id });
-      }
+/**
+ * Récupère les commentaires (+ réponses) de tous les posts en regroupant les
+ * appels par lots via l'endpoint batch de la Graph API : jusqu'à 50 posts
+ * interrogés en une seule requête HTTP (donc une seule "sous-requête" pour
+ * Cloudflare), au lieu d'un appel par post. On avance par "rounds" : à chaque
+ * round, chaque post encore actif reçoit sa page de commentaires suivante ;
+ * un post sort de la boucle dès qu'il n'a plus de page suivante.
+ */
+async function fetchAllCommentsForPosts({ accessToken, posts }) {
+  const commentsByPostId = new Map(posts.map((post) => [post.id, []]));
+  const cursorByPostId = new Map(posts.map((post) => [post.id, undefined]));
+  const done = new Set();
+
+  let round = 0;
+  while (posts.some((post) => !done.has(post.id)) && round < MAX_ROUNDS) {
+    const active = posts.filter((post) => !done.has(post.id));
+
+    for (let i = 0; i < active.length; i += BATCH_SIZE) {
+      const chunk = active.slice(i, i + BATCH_SIZE);
+      const batchRequests = chunk.map((post) => ({
+        method: "GET",
+        relative_url: commentsRelativeUrl(post.id, cursorByPostId.get(post.id)),
+      }));
+
+      const results = await runBatch(batchRequests, accessToken);
+
+      chunk.forEach((post, index) => {
+        const parsed = parseBatchResult(results[index]);
+        if (!parsed) {
+          done.add(post.id);
+          return;
+        }
+
+        for (const item of parsed.data ?? []) {
+          commentsByPostId.get(post.id).push({ ...item, is_reply: false, parent_id: null });
+          for (const reply of item.replies?.data ?? []) {
+            commentsByPostId.get(post.id).push({ ...reply, is_reply: true, parent_id: item.id });
+          }
+        }
+
+        const after = parsed.paging?.cursors?.after;
+        if (parsed.paging?.next && after) {
+          cursorByPostId.set(post.id, after);
+        } else {
+          done.add(post.id);
+        }
+      });
     }
-    const next = body.paging?.next;
-    apiUrl = next ? new URL(next) : null;
+
+    round++;
   }
 
-  return comments;
+  return commentsByPostId;
+}
+
+function commentsRelativeUrl(postId, afterCursor) {
+  const params = new URLSearchParams({ fields: COMMENT_FIELDS, limit: "50" });
+  if (afterCursor) params.set("after", afterCursor);
+  return `${postId}/comments?${params.toString()}`;
+}
+
+async function runBatch(batch, accessToken) {
+  const response = await fetch(`https://graph.facebook.com/${GRAPH_API_VERSION}/`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ access_token: accessToken, batch }),
+  });
+  const body = await response.json();
+  if (!response.ok) {
+    throw new Error(body?.error?.message ?? `Erreur batch API Instagram (${response.status})`);
+  }
+  return body;
+}
+
+function parseBatchResult(result) {
+  if (!result || result.code !== 200) return null;
+  try {
+    return JSON.parse(result.body);
+  } catch {
+    return null;
+  }
 }
 
 async function graphFetch(apiUrl) {

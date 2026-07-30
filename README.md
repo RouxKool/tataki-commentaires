@@ -144,10 +144,11 @@ Wrangler les charge automatiquement pour simuler le Worker en local.
 - **Pagination des posts** : l'API renvoie les posts du plus récent au plus ancien ; la fonction
   s'arrête dès qu'elle atteint un post antérieur à la date de début (pas besoin de tout
   parcourir), donc les périodes récentes sont rapides même si le compte a beaucoup de posts.
-- **Volume de commentaires** : sur une période avec beaucoup de posts très commentés, la requête
-  peut être plus longue. Le plan gratuit Cloudflare Workers limite le nombre de sous-requêtes
-  par appel (50) ; si un export échoue sur une très grosse période ("trop de sous-requêtes"),
-  réessayer sur une période plus courte, ou passer au plan Cloudflare Workers payant (5$/mois,
-  limite à 1000 sous-requêtes) si ce cas devient fréquent.
+- **Volume de commentaires** : les commentaires sont récupérés par lots via l'endpoint batch de
+  la Graph API (jusqu'à 50 posts interrogés en une seule requête HTTP), pour rester loin de la
+  limite de sous-requêtes du plan gratuit Cloudflare Workers (50 par appel). Si malgré tout un
+  export échoue sur une période avec un nombre exceptionnel de posts/commentaires ("trop de
+  sous-requêtes"), réessayer sur une période plus courte, ou passer au plan Cloudflare Workers
+  payant (5$/mois, limite à 1000 sous-requêtes).
 - **Réponses aux commentaires** : les 50 premières réponses par commentaire sont incluses ; au
   delà (rare), les suivantes ne sont pas récupérées.
