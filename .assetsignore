@@ -1,5 +1,12 @@
+node_modules
+.git
+.wrangler
+.gitignore
+.assetsignore
 src
 wrangler.jsonc
 package.json
 package-lock.json
+bun.lock
+bun.lockb
 README.md
