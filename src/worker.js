@@ -45,15 +45,18 @@ async function handleComments(url, env) {
 
   try {
     const posts = await fetchPostsInRange({ accessToken, businessAccountId, start: range.start, end: range.end });
-    const rows = [];
+    const postsWithComments = posts.filter((post) => post.comments_count);
 
-    for (const post of posts) {
-      if (!post.comments_count) continue;
-      const comments = await fetchAllComments({ accessToken, postId: post.id });
-      for (const comment of comments) {
+    const commentsByPost = await Promise.all(
+      postsWithComments.map((post) => fetchAllComments({ accessToken, postId: post.id }))
+    );
+
+    const rows = [];
+    postsWithComments.forEach((post, index) => {
+      for (const comment of commentsByPost[index]) {
         rows.push(commentToRow(post, comment));
       }
-    }
+    });
 
     const csv = buildCsv(rows);
     const filename = `tataki_commentaires_${startParam}_${endParam}.csv`;
