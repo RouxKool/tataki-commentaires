@@ -1,6 +1,7 @@
 const form = document.getElementById("range-form");
 const button = document.getElementById("download-btn");
 const status = document.getElementById("status");
+const progressBar = document.getElementById("progress-bar");
 
 form.addEventListener("submit", async (event) => {
   event.preventDefault();
@@ -18,6 +19,7 @@ form.addEventListener("submit", async (event) => {
   }
 
   button.disabled = true;
+  progressBar.hidden = false;
   setStatus("Récupération des posts et des commentaires en cours...", "");
 
   try {
@@ -27,6 +29,9 @@ form.addEventListener("submit", async (event) => {
       const body = await response.json().catch(() => ({}));
       throw new Error(body.error ?? `Erreur serveur (${response.status})`);
     }
+
+    const postCount = response.headers.get("X-Post-Count") ?? "?";
+    const commentCount = response.headers.get("X-Comment-Count") ?? "?";
 
     const blob = await response.blob();
     const disposition = response.headers.get("Content-Disposition") ?? "";
@@ -42,11 +47,12 @@ form.addEventListener("submit", async (event) => {
     link.remove();
     URL.revokeObjectURL(objectUrl);
 
-    setStatus("Téléchargement terminé.", "success");
+    setStatus(`Téléchargement terminé — ${postCount} post(s), ${commentCount} commentaire(s).`, "success");
   } catch (error) {
     setStatus(error.message, "error");
   } finally {
     button.disabled = false;
+    progressBar.hidden = true;
   }
 });
 

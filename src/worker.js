@@ -64,6 +64,8 @@ async function handleComments(url, env) {
         "Content-Type": "text/csv; charset=utf-8",
         "Content-Disposition": `attachment; filename="${filename}"`,
         "Cache-Control": "no-store",
+        "X-Post-Count": String(postsWithComments.length),
+        "X-Comment-Count": String(rows.length),
       },
     });
   } catch (error) {
