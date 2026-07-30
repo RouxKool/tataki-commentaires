@@ -1,0 +1,12 @@
+{
+  "name": "tataki-commentaires",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Export des commentaires Instagram Tataki sur une période donnée",
+  "scripts": {
+    "dev": "wrangler pages dev . --compatibility-date=2026-01-01"
+  },
+  "devDependencies": {
+    "wrangler": "^3"
+  }
+}

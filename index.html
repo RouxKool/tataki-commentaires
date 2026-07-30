@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Tataki — Export des commentaires Instagram</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <main class="card">
+    <h1>Export des commentaires Instagram</h1>
+    <p class="subtitle">
+      Choisis une période, puis télécharge tous les commentaires (et réponses) des posts
+      publiés sur le compte Instagram Tataki durant cette période, au format CSV.
+    </p>
+
+    <form id="range-form">
+      <div class="field">
+        <label for="start">Du</label>
+        <input type="date" id="start" name="start" required />
+      </div>
+      <div class="field">
+        <label for="end">Au</label>
+        <input type="date" id="end" name="end" required />
+      </div>
+      <button type="submit" id="download-btn">Télécharger les commentaires</button>
+    </form>
+
+    <p id="status" class="status" role="status" aria-live="polite"></p>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>
