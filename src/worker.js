@@ -43,34 +43,46 @@ async function handleComments(url, env) {
     );
   }
 
-  try {
-    const posts = await fetchPostsInRange({ accessToken, businessAccountId, start: range.start, end: range.end });
-    const postsWithComments = posts.filter((post) => post.comments_count);
-    const commentsByPostId = await fetchAllCommentsForPosts({ accessToken, posts: postsWithComments });
+  const { readable, writable } = new TransformStream();
+  const writer = writable.getWriter();
+  const encoder = new TextEncoder();
+  const send = (event) => writer.write(encoder.encode(JSON.stringify(event) + "\n"));
 
-    const rows = [];
-    for (const post of postsWithComments) {
-      for (const comment of commentsByPostId.get(post.id) ?? []) {
-        rows.push(commentToRow(post, comment));
+  (async () => {
+    try {
+      const posts = await fetchPostsInRange({ accessToken, businessAccountId, start: range.start, end: range.end });
+      const postsWithComments = posts.filter((post) => post.comments_count);
+      await send({ type: "total", totalPosts: postsWithComments.length });
+
+      const commentsByPostId = await fetchAllCommentsForPosts({
+        accessToken,
+        posts: postsWithComments,
+        onProgress: (progress) => send({ type: "progress", totalPosts: postsWithComments.length, ...progress }),
+      });
+
+      const rows = [];
+      for (const post of postsWithComments) {
+        for (const comment of commentsByPostId.get(post.id) ?? []) {
+          rows.push(commentToRow(post, comment));
+        }
       }
+
+      const csv = buildCsv(rows);
+      await send({ type: "result", postCount: postsWithComments.length, commentCount: rows.length, csv });
+    } catch (error) {
+      await send({ type: "error", message: `Échec de la récupération : ${error.message}` });
+    } finally {
+      await writer.close();
     }
+  })();
 
-    const csv = buildCsv(rows);
-    const filename = `tataki_commentaires_${startParam}_${endParam}.csv`;
-
-    return new Response(csv, {
-      status: 200,
-      headers: {
-        "Content-Type": "text/csv; charset=utf-8",
-        "Content-Disposition": `attachment; filename="${filename}"`,
-        "Cache-Control": "no-store",
-        "X-Post-Count": String(postsWithComments.length),
-        "X-Comment-Count": String(rows.length),
-      },
-    });
-  } catch (error) {
-    return jsonError(`Échec de la récupération : ${error.message}`, 502);
-  }
+  return new Response(readable, {
+    status: 200,
+    headers: {
+      "Content-Type": "application/x-ndjson; charset=utf-8",
+      "Cache-Control": "no-store",
+    },
+  });
 }
 
 function parseRange(startParam, endParam) {
@@ -131,7 +143,7 @@ const MAX_ROUNDS = 200; // garde-fou contre une boucle infinie en cas de répons
  * round, chaque post encore actif reçoit sa page de commentaires suivante ;
  * un post sort de la boucle dès qu'il n'a plus de page suivante.
  */
-async function fetchAllCommentsForPosts({ accessToken, posts }) {
+async function fetchAllCommentsForPosts({ accessToken, posts, onProgress }) {
   const commentsByPostId = new Map(posts.map((post) => [post.id, []]));
   const cursorByPostId = new Map(posts.map((post) => [post.id, undefined]));
   const done = new Set();
@@ -170,6 +182,11 @@ async function fetchAllCommentsForPosts({ accessToken, posts }) {
           done.add(post.id);
         }
       });
+
+      if (onProgress) {
+        const commentsSoFar = posts.reduce((sum, post) => sum + commentsByPostId.get(post.id).length, 0);
+        await onProgress({ postsDone: done.size, commentsSoFar });
+      }
     }
 
     round++;

@@ -2,6 +2,7 @@ const form = document.getElementById("range-form");
 const button = document.getElementById("download-btn");
 const status = document.getElementById("status");
 const progressBar = document.getElementById("progress-bar");
+const progressFill = progressBar.querySelector(".progress-bar-fill");
 
 form.addEventListener("submit", async (event) => {
   event.preventDefault();
@@ -19,8 +20,8 @@ form.addEventListener("submit", async (event) => {
   }
 
   button.disabled = true;
-  progressBar.hidden = false;
-  setStatus("Récupération des posts et des commentaires en cours...", "");
+  showProgress(0);
+  setStatus("Recherche des posts sur cette période...", "");
 
   try {
     const response = await fetch(`/api/comments?start=${start}&end=${end}`);
@@ -30,13 +31,33 @@ form.addEventListener("submit", async (event) => {
       throw new Error(body.error ?? `Erreur serveur (${response.status})`);
     }
 
-    const postCount = response.headers.get("X-Post-Count") ?? "?";
-    const commentCount = response.headers.get("X-Comment-Count") ?? "?";
+    const result = await readProgressStream(response.body, (event) => {
+      if (event.type === "total") {
+        setStatus(
+          event.totalPosts === 0
+            ? "Aucun post avec commentaires sur cette période."
+            : `0 / ${event.totalPosts} post(s) traité(s)...`,
+          ""
+        );
+        showProgress(event.totalPosts === 0 ? 100 : 0);
+      } else if (event.type === "progress") {
+        const pct = event.totalPosts ? Math.round((event.postsDone / event.totalPosts) * 100) : 0;
+        showProgress(pct);
+        setStatus(
+          `${event.postsDone} / ${event.totalPosts} post(s) traité(s) — ${event.commentsSoFar} commentaire(s) récupéré(s)...`,
+          ""
+        );
+      }
+    });
 
-    const blob = await response.blob();
-    const disposition = response.headers.get("Content-Disposition") ?? "";
-    const match = disposition.match(/filename="([^"]+)"/);
-    const filename = match ? match[1] : `tataki_commentaires_${start}_${end}.csv`;
+    if (!result) {
+      throw new Error("Réponse incomplète du serveur.");
+    }
+
+    showProgress(100);
+
+    const blob = new Blob([result.csv], { type: "text/csv;charset=utf-8" });
+    const filename = `tataki_commentaires_${start}_${end}.csv`;
 
     const objectUrl = URL.createObjectURL(blob);
     const link = document.createElement("a");
@@ -47,7 +68,7 @@ form.addEventListener("submit", async (event) => {
     link.remove();
     URL.revokeObjectURL(objectUrl);
 
-    setStatus(`Téléchargement terminé — ${postCount} post(s), ${commentCount} commentaire(s).`, "success");
+    setStatus(`Téléchargement terminé — ${result.postCount} post(s), ${result.commentCount} commentaire(s).`, "success");
   } catch (error) {
     setStatus(error.message, "error");
   } finally {
@@ -55,6 +76,47 @@ form.addEventListener("submit", async (event) => {
     progressBar.hidden = true;
   }
 });
+
+/**
+ * Le serveur envoie une ligne JSON par mise à jour ("total", "progress", puis
+ * "result" avec le CSV final). onEvent est appelé pour chaque ligne reçue ;
+ * la fonction retourne l'objet "result" une fois le flux terminé.
+ */
+async function readProgressStream(body, onEvent) {
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let result = null;
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+
+    let newlineIndex;
+    while ((newlineIndex = buffer.indexOf("\n")) >= 0) {
+      const line = buffer.slice(0, newlineIndex);
+      buffer = buffer.slice(newlineIndex + 1);
+      if (!line.trim()) continue;
+
+      const parsedEvent = JSON.parse(line);
+      if (parsedEvent.type === "error") {
+        throw new Error(parsedEvent.message);
+      } else if (parsedEvent.type === "result") {
+        result = parsedEvent;
+      } else {
+        onEvent(parsedEvent);
+      }
+    }
+  }
+
+  return result;
+}
+
+function showProgress(percent) {
+  progressBar.hidden = false;
+  progressFill.style.width = `${percent}%`;
+}
 
 function setStatus(message, kind) {
   status.textContent = message;
