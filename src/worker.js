@@ -15,8 +15,17 @@ const CSV_HEADER = [
   "parent_comment_id",
 ];
 
-export async function onRequestGet({ request, env }) {
-  const url = new URL(request.url);
+export default {
+  async fetch(request, env) {
+    const url = new URL(request.url);
+    if (url.pathname === "/api/comments" && request.method === "GET") {
+      return handleComments(url, env);
+    }
+    return env.ASSETS.fetch(request);
+  },
+};
+
+async function handleComments(url, env) {
   const startParam = url.searchParams.get("start");
   const endParam = url.searchParams.get("end");
 

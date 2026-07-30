@@ -10,20 +10,25 @@ installer.
 ## Architecture
 
 ```
-Cloudflare Pages (frontend + fonction serveur, tout au même endroit)
+Cloudflare Worker (frontend + fonction serveur, tout au même endroit)
    ├─ index.html / app.js / style.css   → page avec le calendrier + bouton
-   └─ functions/api/comments.js         → fonction serveur (Pages Function) :
-         reçoit start/end, appelle l'Instagram Graph API avec le token
-         (caché côté serveur), récupère les posts de la période + tous
-         leurs commentaires, renvoie un CSV en téléchargement direct.
+   │                                       (servis tels quels via les "assets" du Worker)
+   └─ src/worker.js                     → reçoit start/end sur /api/comments, appelle
+         l'Instagram Graph API avec le token (caché côté serveur), récupère les
+         posts de la période + tous leurs commentaires, renvoie un CSV en
+         téléchargement direct. Pour toute autre URL, sert les fichiers statiques.
 ```
 
 Contrairement à `insta-recherche` (site 100% statique sur GitHub Pages, données pré-calculées
 par un cron), ici le token Instagram doit rester secret ET la récupération se fait à la demande
 avec des dates choisies par l'utilisateur — il faut donc une vraie fonction serveur. GitHub
-Pages ne sait pas faire ça : c'est pour ça que ce projet est hébergé sur **Cloudflare Pages**
-(gratuit) plutôt que GitHub Pages. GitHub reste uniquement le dépôt de code ; Cloudflare se
-connecte au repo et redéploie automatiquement à chaque push.
+Pages ne sait pas faire ça : c'est pour ça que ce projet est hébergé sur **Cloudflare** (gratuit)
+plutôt que GitHub Pages. GitHub reste uniquement le dépôt de code ; Cloudflare se connecte au
+repo et redéploie automatiquement à chaque push.
+
+(Note technique : l'ancien mode simple "Cloudflare Pages" n'est plus proposé aux nouveaux
+comptes Cloudflare — le fichier `wrangler.jsonc` à la racine du projet configure le mode
+"Workers" actuel, qui fait la même chose.)
 
 ## Schéma du CSV téléchargé
 
@@ -65,18 +70,18 @@ git branch -M main
 git push -u origin main
 ```
 
-### 2. Déployer sur Cloudflare Pages
+### 2. Déployer sur Cloudflare
 
-1. [dash.cloudflare.com](https://dash.cloudflare.com) → **Workers & Pages** → **Create** → **Pages** → **Connect to Git**.
+1. [dash.cloudflare.com](https://dash.cloudflare.com) → **Workers & Pages** → **Create** → **Connect to Git** (ou onglet **Workers**, selon la version du tableau de bord).
 2. Choisir le repo `tataki-commentaires`.
-3. Build settings : **Framework preset : None**, **Build command : (laisser vide)**,
-   **Build output directory : `/`**.
+3. Build settings : **Build command : (laisser vide)**, **Deploy command : `npx wrangler deploy`**
+   (déjà pré-rempli par défaut). La configuration (nom, fichiers à servir) vient du fichier
+   `wrangler.jsonc` du repo, rien d'autre à remplir.
 4. Déployer.
 
 ### 3. Ajouter les secrets
 
-Dans le projet Cloudflare Pages → **Settings → Environment variables**, ajouter (en
-"Encrypted") pour l'environnement **Production** (et **Preview**) :
+Dans le projet Cloudflare → **Settings → Variables and Secrets**, ajouter (type **Secret**) :
 
 - `INSTAGRAM_ACCESS_TOKEN`
 - `INSTAGRAM_BUSINESS_ACCOUNT_ID`
@@ -89,8 +94,8 @@ https://graph.instagram.com/refresh_access_token?grant_type=ig_refresh_token&acc
 puis mettre à jour la variable ici (et dans les secrets GitHub de `insta-recherche`, si les deux
 doivent rester synchronisés).
 
-Après avoir ajouté/modifié les variables, redéployer (Cloudflare Pages → onglet
-**Deployments** → **Retry deployment**) pour qu'elles soient prises en compte.
+Après avoir ajouté/modifié les variables, redéployer (onglet **Deployments** → **Retry
+deployment**) pour qu'elles soient prises en compte.
 
 ### 4. Restreindre l'accès à l'équipe (Cloudflare Access)
 
@@ -100,8 +105,8 @@ l'équipe :
 
 1. [one.dash.cloudflare.com](https://one.dash.cloudflare.com) (Zero Trust) → **Access →
    Applications → Add an application → Self-hosted**.
-2. **Application domain** : le domaine `*.pages.dev` attribué au projet (visible dans Cloudflare
-   Pages → onglet **Deployments**, ou domaine personnalisé si configuré).
+2. **Application domain** : le domaine `*.workers.dev` attribué au projet (visible dans l'onglet
+   **Deployments** du projet Cloudflare, ou domaine personnalisé si configuré).
 3. **Policy** : Action **Allow**, règle **Emails** → lister les adresses email de l'équipe.
 4. Sauvegarder.
 
@@ -112,7 +117,7 @@ par mail) avant d'accéder au site. Aucun code à écrire, tout se configure dan
 
 ```bash
 npm install
-npx wrangler pages dev . --compatibility-date=2026-01-01
+npx wrangler dev
 ```
 
 Créer un fichier `.env` (non commité, voir `.gitignore`) avec :
@@ -122,14 +127,17 @@ INSTAGRAM_ACCESS_TOKEN=...
 INSTAGRAM_BUSINESS_ACCOUNT_ID=...
 ```
 
-Wrangler les charge automatiquement pour simuler la Pages Function en local.
+Wrangler les charge automatiquement pour simuler le Worker en local.
 
 ## Fichiers clés
 
 - `index.html` / `style.css` — page avec le calendrier (dates de début/fin) et le bouton
 - `app.js` — déclenche l'appel à `/api/comments`, gère le téléchargement du CSV
-- `functions/api/comments.js` — Pages Function : appelle l'Instagram Graph API (pagination des
-  posts puis des commentaires/réponses de chaque post dans la période), génère le CSV
+- `src/worker.js` — logique serveur : appelle l'Instagram Graph API (pagination des posts puis
+  des commentaires/réponses de chaque post dans la période), génère le CSV ; sert les fichiers
+  statiques pour toute autre URL
+- `wrangler.jsonc` — configuration Cloudflare (nom du projet, fichier serveur, dossier des
+  fichiers statiques)
 
 ## Limites connues
 

@@ -4,9 +4,10 @@
   "version": "1.0.0",
   "description": "Export des commentaires Instagram Tataki sur une période donnée",
   "scripts": {
-    "dev": "wrangler pages dev . --compatibility-date=2026-01-01"
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy"
   },
   "devDependencies": {
-    "wrangler": "^3"
+    "wrangler": "^4"
   }
 }
