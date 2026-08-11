@@ -3,16 +3,15 @@ const MEDIA_FIELDS = "id,permalink,timestamp,caption,comments_count";
 const COMMENT_FIELDS =
   "id,text,username,timestamp,like_count,replies.limit(50){id,text,username,timestamp,like_count}";
 const CSV_HEADER = [
-  "post_id",
-  "post_permalink",
+  "post",
   "post_date",
   "comment_id",
   "author",
   "text",
   "likes",
   "comment_date",
-  "is_reply",
-  "parent_comment_id",
+  "type",
+  "parent_comment",
 ];
 
 export default {
@@ -169,9 +168,9 @@ async function fetchAllCommentsForPosts({ accessToken, posts, onProgress }) {
         }
 
         for (const item of parsed.data ?? []) {
-          commentsByPostId.get(post.id).push({ ...item, is_reply: false, parent_id: null });
+          commentsByPostId.get(post.id).push({ ...item, is_reply: false, parent_text: null });
           for (const reply of item.replies?.data ?? []) {
-            commentsByPostId.get(post.id).push({ ...reply, is_reply: true, parent_id: item.id });
+            commentsByPostId.get(post.id).push({ ...reply, is_reply: true, parent_text: item.text });
           }
         }
 
@@ -234,17 +233,23 @@ async function graphFetch(apiUrl) {
 
 function commentToRow(post, comment) {
   return [
-    post.id,
-    post.permalink ?? "",
+    excerpt(post.caption) || "(sans légende)",
     post.timestamp ?? "",
     comment.id ?? "",
     comment.username ?? "",
     (comment.text ?? "").replace(/\r?\n/g, " ").trim(),
     comment.like_count ?? 0,
     comment.timestamp ?? "",
-    comment.is_reply ? "oui" : "non",
-    comment.parent_id ?? "",
+    comment.is_reply ? "réponse" : "commentaire",
+    comment.is_reply ? excerpt(comment.parent_text) : "",
   ];
+}
+
+/** Extrait les ~60 premiers caractères d'un texte (légende ou commentaire) pour l'identifier facilement dans le CSV. */
+function excerpt(text, maxLength = 60) {
+  const clean = (text ?? "").replace(/\r?\n/g, " ").trim();
+  if (!clean) return "";
+  return clean.length > maxLength ? `${clean.slice(0, maxLength).trim()}…` : clean;
 }
 
 function buildCsv(rows) {
