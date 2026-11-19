@@ -132,9 +132,9 @@ Wrangler les charge automatiquement pour simuler le Worker en local.
 ## Fichiers clés
 
 - `index.html` / `style.css` — page avec le calendrier (dates de début/fin) et le bouton
-- `app.js` — déclenche l'appel à `/api/comments`, gère le téléchargement du CSV
+- `app.js` — appelle `/api/comments` (et le relance tant qu'il reste des posts), génère et télécharge le CSV
 - `src/worker.js` — logique serveur : appelle l'Instagram Graph API (pagination des posts puis
-  des commentaires/réponses de chaque post dans la période), génère le CSV ; sert les fichiers
+  des commentaires/réponses de chaque post dans la période), par tranches de 45 sous-requêtes ; sert les fichiers
   statiques pour toute autre URL
 - `wrangler.jsonc` — configuration Cloudflare (nom du projet, fichier serveur, dossier des
   fichiers statiques)
@@ -145,10 +145,11 @@ Wrangler les charge automatiquement pour simuler le Worker en local.
   s'arrête dès qu'elle atteint un post antérieur à la date de début (pas besoin de tout
   parcourir), donc les périodes récentes sont rapides même si le compte a beaucoup de posts.
 - **Volume de commentaires** : les commentaires sont récupérés par lots via l'endpoint batch de
-  la Graph API (jusqu'à 50 posts interrogés en une seule requête HTTP), pour rester loin de la
-  limite de sous-requêtes du plan gratuit Cloudflare Workers (50 par appel). Si malgré tout un
-  export échoue sur une période avec un nombre exceptionnel de posts/commentaires ("trop de
-  sous-requêtes"), réessayer sur une période plus courte, ou passer au plan Cloudflare Workers
-  payant (5$/mois, limite à 1000 sous-requêtes).
+  la Graph API (jusqu'à 50 posts interrogés en une seule requête HTTP). Le plan gratuit
+  Cloudflare Workers limite chaque appel à 50 sous-requêtes : le Worker s'arrête à 45, renvoie
+  les posts encore incomplets, et la page le relance automatiquement jusqu'à la fin. Il n'y a
+  donc plus de limite de durée par export liée aux commentaires.
+- **Liste des posts** : elle doit tenir dans un seul appel (~2000 posts publiés entre la date de
+  début et aujourd'hui). Au-delà, message d'erreur demandant une date de début plus récente.
 - **Réponses aux commentaires** : les 50 premières réponses par commentaire sont incluses ; au
   delà (rare), les suivantes ne sont pas récupérées.

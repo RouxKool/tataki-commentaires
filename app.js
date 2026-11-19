@@ -3,6 +3,8 @@ const button = document.getElementById("download-btn");
 const status = document.getElementById("status");
 const progressBar = document.getElementById("progress-bar");
 const progressFill = progressBar.querySelector(".progress-bar-fill");
+const MAX_CALLS = 200; // garde-fou contre une boucle infinie si l'API renvoyait toujours une page suivante
+const CSV_HEADER = ["post", "post_date", "comment_id", "author", "text", "likes", "comment_date", "type", "parent_comment"];
 
 form.addEventListener("submit", async (event) => {
   event.preventDefault();
@@ -24,37 +26,57 @@ form.addEventListener("submit", async (event) => {
   setStatus("Recherche des posts sur cette période...", "");
 
   try {
-    const response = await fetch(`/api/comments?start=${start}&end=${end}`);
+    // Le serveur traite l'export en plusieurs appels (limite Cloudflare de 50 sous-requêtes
+    // par appel) : on le relance avec les posts restants tant qu'il en reste.
+    let totalPosts = 0;
+    let pending = null;
+    const rows = [];
 
-    if (!response.ok) {
-      const body = await response.json().catch(() => ({}));
-      throw new Error(body.error ?? `Erreur serveur (${response.status})`);
-    }
+    for (let call = 0; call === 0 || pending.length; call++) {
+      if (call >= MAX_CALLS) throw new Error("Export interrompu : trop de commentaires sur cette période.");
 
-    const result = await readProgressStream(response.body, (event) => {
-      if (event.type === "total") {
-        setStatus(
-          event.totalPosts === 0
-            ? "Aucun post avec commentaires sur cette période."
-            : `0 / ${event.totalPosts} post(s) traité(s)...`,
-          ""
-        );
-        showProgress(event.totalPosts === 0 ? 100 : 0);
-      } else if (event.type === "progress") {
-        const pct = event.totalPosts ? Math.round((event.postsDone / event.totalPosts) * 100) : 0;
-        showProgress(pct);
-        setStatus(
-          `${event.postsDone} / ${event.totalPosts} post(s) traité(s) — ${event.commentsSoFar} commentaire(s) récupéré(s)...`,
-          ""
-        );
+      const response = pending
+        ? await fetch("/api/comments", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ pending }),
+          })
+        : await fetch(`/api/comments?start=${start}&end=${end}`);
+
+      if (!response.ok) {
+        const body = await response.json().catch(() => ({}));
+        throw new Error(body.error ?? `Erreur serveur (${response.status})`);
       }
-    });
 
-    if (!result) {
-      throw new Error("Réponse incomplète du serveur.");
+      const result = await readProgressStream(response.body, (event) => {
+        if (event.type === "total") {
+          totalPosts = event.totalPosts;
+          setStatus(
+            totalPosts === 0 ? "Aucun post avec commentaires sur cette période." : `0 / ${totalPosts} post(s) traité(s)...`,
+            ""
+          );
+          showProgress(totalPosts === 0 ? 100 : 0);
+        } else if (event.type === "progress") {
+          const postsDone = totalPosts - event.remaining;
+          showProgress(totalPosts ? Math.round((postsDone / totalPosts) * 100) : 0);
+          setStatus(
+            `${postsDone} / ${totalPosts} post(s) traité(s) — ${rows.length + event.commentsSoFar} commentaire(s) récupéré(s)...`,
+            ""
+          );
+        }
+      });
+
+      if (!result) {
+        throw new Error("Réponse incomplète du serveur.");
+      }
+      rows.push(...result.rows);
+      pending = result.pending;
     }
 
     showProgress(100);
+    // Les appels successifs mélangent les posts : on regroupe par post, du plus récent au plus ancien (tri stable).
+    rows.sort((a, b) => (a[1] < b[1] ? 1 : a[1] > b[1] ? -1 : 0));
+    const result = { csv: buildCsv(rows), postCount: totalPosts, commentCount: rows.length };
 
     const blob = new Blob([result.csv], { type: "text/csv;charset=utf-8" });
     const filename = `tataki_commentaires_${start}_${end}.csv`;
@@ -79,7 +101,7 @@ form.addEventListener("submit", async (event) => {
 
 /**
  * Le serveur envoie une ligne JSON par mise à jour ("total", "progress", puis
- * "result" avec le CSV final). onEvent est appelé pour chaque ligne reçue ;
+ * "result" avec les lignes récupérées et les posts restants). onEvent est appelé pour chaque ligne reçue ;
  * la fonction retourne l'objet "result" une fois le flux terminé.
  */
 async function readProgressStream(body, onEvent) {
@@ -121,4 +143,14 @@ function showProgress(percent) {
 function setStatus(message, kind) {
   status.textContent = message;
   status.className = kind ? `status ${kind}` : "status";
+}
+
+function buildCsv(rows) {
+  const lines = [CSV_HEADER, ...rows].map((row) => row.map(csvEscape).join(","));
+  return "\uFEFF" + lines.join("\r\n") + "\r\n"; // BOM pour qu'Excel affiche correctement les accents/emojis
+}
+
+function csvEscape(value) {
+  const str = String(value ?? "");
+  return /[",\r\n]/.test(str) ? `"${str.replace(/"/g, '""')}"` : str;
 }
