@@ -2,35 +2,32 @@ const GRAPH_API_VERSION = "v22.0";
 const MEDIA_FIELDS = "id,permalink,timestamp,caption,comments_count";
 const COMMENT_FIELDS =
   "id,text,username,timestamp,like_count,replies.limit(50){id,text,username,timestamp,like_count}";
-const CSV_HEADER = [
-  "post",
-  "post_date",
-  "comment_id",
-  "author",
-  "text",
-  "likes",
-  "comment_date",
-  "type",
-  "parent_comment",
-];
-
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
-    if (url.pathname === "/api/comments" && request.method === "GET") {
-      return handleComments(url, env);
+    if (url.pathname === "/api/comments" && (request.method === "GET" || request.method === "POST")) {
+      return handleComments(request, url, env);
     }
     return env.ASSETS.fetch(request);
   },
 };
 
-async function handleComments(url, env) {
-  const startParam = url.searchParams.get("start");
-  const endParam = url.searchParams.get("end");
-
-  const range = parseRange(startParam, endParam);
-  if (range.error) {
-    return jsonError(range.error, 400);
+/**
+ * Le plan gratuit Cloudflare limite chaque appel à 50 sous-requêtes. Un export
+ * se fait donc en plusieurs appels : le 1er (GET start/end) liste les posts, puis
+ * chaque appel récupère des pages de commentaires jusqu'à épuiser son budget et
+ * renvoie les posts encore incomplets ("pending"). Le navigateur relance alors
+ * un POST avec ce "pending", jusqu'à ce qu'il soit vide.
+ */
+async function handleComments(request, url, env) {
+  let range = null;
+  let pending = null;
+  if (request.method === "GET") {
+    range = parseRange(url.searchParams.get("start"), url.searchParams.get("end"));
+    if (range.error) return jsonError(range.error, 400);
+  } else {
+    pending = parsePending(await request.json().catch(() => null));
+    if (!pending) return jsonError("Corps de requête invalide.", 400);
   }
 
   const accessToken = env.INSTAGRAM_ACCESS_TOKEN;
@@ -49,25 +46,23 @@ async function handleComments(url, env) {
 
   (async () => {
     try {
-      const posts = await fetchPostsInRange({ accessToken, businessAccountId, start: range.start, end: range.end });
-      const postsWithComments = posts.filter((post) => post.comments_count);
-      await send({ type: "total", totalPosts: postsWithComments.length });
-
-      const commentsByPostId = await fetchAllCommentsForPosts({
-        accessToken,
-        posts: postsWithComments,
-        onProgress: (progress) => send({ type: "progress", totalPosts: postsWithComments.length, ...progress }),
-      });
-
-      const rows = [];
-      for (const post of postsWithComments) {
-        for (const comment of commentsByPostId.get(post.id) ?? []) {
-          rows.push(commentToRow(post, comment));
-        }
+      const budget = { left: SUBREQUEST_BUDGET };
+      if (range) {
+        const posts = await fetchPostsInRange({ accessToken, businessAccountId, start: range.start, end: range.end, budget });
+        pending = posts
+          .filter((post) => post.comments_count)
+          .map((post) => ({ id: post.id, caption: post.caption ?? "", timestamp: post.timestamp ?? "", after: null }));
+        await send({ type: "total", totalPosts: pending.length });
       }
 
-      const csv = buildCsv(rows);
-      await send({ type: "result", postCount: postsWithComments.length, commentCount: rows.length, csv });
+      const result = await fetchComments({
+        accessToken,
+        posts: pending,
+        budget,
+        onProgress: (progress) => send({ type: "progress", ...progress }),
+      });
+
+      await send({ type: "result", rows: result.rows, pending: result.pending });
     } catch (error) {
       await send({ type: "error", message: `Échec de la récupération : ${error.message}` });
     } finally {
@@ -82,6 +77,19 @@ async function handleComments(url, env) {
       "Cache-Control": "no-store",
     },
   });
+}
+
+/** Valide l'état renvoyé par le navigateur (frontière de confiance : l'id finit dans une URL Graph API). */
+function parsePending(body) {
+  const list = body?.pending;
+  if (!Array.isArray(list) || list.length > 10000) return null;
+  const ok = list.every(
+    (p) =>
+      typeof p?.id === "string" && /^\d+$/.test(p.id) &&
+      typeof p.caption === "string" && typeof p.timestamp === "string" &&
+      (p.after === null || (typeof p.after === "string" && p.after.length < 2000))
+  );
+  return ok ? list.map(({ id, caption, timestamp, after }) => ({ id, caption, timestamp, after })) : null;
 }
 
 function parseRange(startParam, endParam) {
@@ -101,7 +109,7 @@ function parseRange(startParam, endParam) {
  * Les posts sont renvoyés du plus récent au plus ancien par l'API : on arrête
  * la pagination dès qu'un post est antérieur à `start`, inutile d'aller plus loin.
  */
-async function fetchPostsInRange({ accessToken, businessAccountId, start, end }) {
+async function fetchPostsInRange({ accessToken, businessAccountId, start, end, budget }) {
   const posts = [];
   let apiUrl = new URL(`https://graph.facebook.com/${GRAPH_API_VERSION}/${businessAccountId}/media`);
   apiUrl.searchParams.set("fields", MEDIA_FIELDS);
@@ -109,6 +117,10 @@ async function fetchPostsInRange({ accessToken, businessAccountId, start, end })
   apiUrl.searchParams.set("access_token", accessToken);
 
   while (apiUrl) {
+    // shortcut: la liste des posts doit tenir dans un seul appel (~2000 posts plus récents que le début), sinon erreur claire
+    if (budget.left-- <= 0) {
+      throw new Error("trop de posts entre la date de début et aujourd'hui. Choisis une date de début plus récente.");
+    }
     const body = await graphFetch(apiUrl);
     let reachedOlderThanStart = false;
 
@@ -132,66 +144,58 @@ async function fetchPostsInRange({ accessToken, businessAccountId, start, end })
 }
 
 const BATCH_SIZE = 50; // max sous-requêtes par appel batch Graph API
-const MAX_ROUNDS = 200; // garde-fou contre une boucle infinie en cas de réponse inattendue
+const SUBREQUEST_BUDGET = 45; // plan gratuit Cloudflare : 50 sous-requêtes par appel, on garde une marge
 
 /**
- * Récupère les commentaires (+ réponses) de tous les posts en regroupant les
- * appels par lots via l'endpoint batch de la Graph API : jusqu'à 50 posts
- * interrogés en une seule requête HTTP (donc une seule "sous-requête" pour
- * Cloudflare), au lieu d'un appel par post. On avance par "rounds" : à chaque
- * round, chaque post encore actif reçoit sa page de commentaires suivante ;
- * un post sort de la boucle dès qu'il n'a plus de page suivante.
+ * Récupère les commentaires (+ réponses) en regroupant les appels via l'endpoint
+ * batch de la Graph API : jusqu'à 50 posts interrogés en une seule requête HTTP
+ * (une seule sous-requête Cloudflare). On avance par "rounds" : à chaque round,
+ * chaque post encore actif reçoit sa page de commentaires suivante. On s'arrête
+ * quand tout est récupéré ou quand le budget de sous-requêtes est épuisé ; les
+ * posts incomplets sont renvoyés (avec leur curseur) pour l'appel suivant.
  */
-async function fetchAllCommentsForPosts({ accessToken, posts, onProgress }) {
-  const commentsByPostId = new Map(posts.map((post) => [post.id, []]));
-  const cursorByPostId = new Map(posts.map((post) => [post.id, undefined]));
-  const done = new Set();
+async function fetchComments({ accessToken, posts, budget, onProgress }) {
+  const rows = [];
+  let active = posts;
 
-  let round = 0;
-  while (posts.some((post) => !done.has(post.id)) && round < MAX_ROUNDS) {
-    const active = posts.filter((post) => !done.has(post.id));
-
+  while (active.length && budget.left > 0) {
+    const stillActive = [];
     for (let i = 0; i < active.length; i += BATCH_SIZE) {
       const chunk = active.slice(i, i + BATCH_SIZE);
+      if (budget.left <= 0) {
+        stillActive.push(...chunk);
+        continue;
+      }
+      budget.left--;
+
       const batchRequests = chunk.map((post) => ({
         method: "GET",
-        relative_url: commentsRelativeUrl(post.id, cursorByPostId.get(post.id)),
+        relative_url: commentsRelativeUrl(post.id, post.after),
       }));
-
       const results = await runBatch(batchRequests, accessToken);
 
       chunk.forEach((post, index) => {
         const parsed = parseBatchResult(results[index]);
-        if (!parsed) {
-          done.add(post.id);
-          return;
-        }
+        if (!parsed) return;
 
         for (const item of parsed.data ?? []) {
-          commentsByPostId.get(post.id).push({ ...item, is_reply: false, parent_text: null });
+          rows.push(commentToRow(post, { ...item, is_reply: false, parent_text: null }));
           for (const reply of item.replies?.data ?? []) {
-            commentsByPostId.get(post.id).push({ ...reply, is_reply: true, parent_text: item.text });
+            rows.push(commentToRow(post, { ...reply, is_reply: true, parent_text: item.text }));
           }
         }
 
         const after = parsed.paging?.cursors?.after;
-        if (parsed.paging?.next && after) {
-          cursorByPostId.set(post.id, after);
-        } else {
-          done.add(post.id);
-        }
+        if (parsed.paging?.next && after) stillActive.push({ ...post, after });
       });
 
-      if (onProgress) {
-        const commentsSoFar = posts.reduce((sum, post) => sum + commentsByPostId.get(post.id).length, 0);
-        await onProgress({ postsDone: done.size, commentsSoFar });
-      }
+      const notYetVisited = active.length - i - chunk.length;
+      await onProgress({ remaining: stillActive.length + notYetVisited, commentsSoFar: rows.length });
     }
-
-    round++;
+    active = stillActive;
   }
 
-  return commentsByPostId;
+  return { rows, pending: active };
 }
 
 function commentsRelativeUrl(postId, afterCursor) {
@@ -250,20 +254,6 @@ function excerpt(text, maxLength = 60) {
   const clean = (text ?? "").replace(/\r?\n/g, " ").trim();
   if (!clean) return "";
   return clean.length > maxLength ? `${clean.slice(0, maxLength).trim()}…` : clean;
-}
-
-function buildCsv(rows) {
-  const lines = [CSV_HEADER, ...rows].map((row) => row.map(csvEscape).join(","));
-  const bom = "﻿"; // pour qu'Excel affiche correctement les accents/emojis
-  return bom + lines.join("\r\n") + "\r\n";
-}
-
-function csvEscape(value) {
-  const str = String(value ?? "");
-  if (/[",\r\n]/.test(str)) {
-    return `"${str.replace(/"/g, '""')}"`;
-  }
-  return str;
 }
 
 function jsonError(message, status) {
